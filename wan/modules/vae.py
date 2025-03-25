@@ -514,6 +514,56 @@ class WanVAE_(nn.Module):
         return x_recon, mu, log_var
 
     def encode(self, x, scale):
+        chunk_size = 2
+        """
+        改造后的动态分块编码函数
+        Args:
+            x: [B, C, T, H, W] 输入视频张量
+            chunk_size: 时间轴分块大小（可动态调整）
+        """
+        self.clear_cache()
+        B, C, T, H, W = x.shape
+        mu_list = []
+    
+        # 动态分块逻辑（支持非整除情况）
+        num_chunks = (T + chunk_size - 1) // chunk_size
+        chunk_ranges = [(i*chunk_size, min((i+1)*chunk_size, T)) 
+                        for i in range(num_chunks)]
+    
+        for start, end in chunk_ranges:
+            # 提取当前块 [B, C, chunk_T, H, W]
+            x_chunk = x[:, :, start:end, :, :]
+    
+            # 使用混合精度降低显存
+            with amp.autocast(dtype=self.dtype):
+                # 编码当前块
+                out = self.encoder(
+                    x_chunk,
+                    feat_cache=self._enc_feat_map,
+                    feat_idx=self._enc_conv_idx
+                )
+                
+                # 计算mu并立即释放中间变量
+                mu_chunk, _ = self.conv1(out).chunk(2, dim=1)
+                del out  # 显式释放显存
+    
+            # 应用scale参数并转移至CPU暂存
+            if isinstance(scale[0], torch.Tensor):
+                mu_chunk = (mu_chunk - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(1, self.z_dim, 1, 1, 1)
+            else:
+                mu_chunk = (mu_chunk - scale[0]) * scale[1]
+            
+            mu_list.append(mu_chunk.cpu())  # 移出GPU
+            del mu_chunk
+            torch.cuda.empty_cache()
+    
+        # 在CPU上拼接后移回GPU
+        mu = torch.cat(mu_list, dim=2).to(x.device)
+        self.clear_cache()
+        return mu
+        
+""" original
+    def encode(self, x, scale):
         self.clear_cache()
         ## cache
         t = x.shape[2]
@@ -540,7 +590,7 @@ class WanVAE_(nn.Module):
             mu = (mu - scale[0]) * scale[1]
         self.clear_cache()
         return mu
-
+"""
     def decode(self, z, scale):
         self.clear_cache()
         # z: [b,c,t,h,w]
