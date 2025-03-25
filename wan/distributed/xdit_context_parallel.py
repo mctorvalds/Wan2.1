@@ -89,11 +89,6 @@ def rope_apply(x: torch.Tensor, grid_sizes: torch.Tensor, freqs: torch.Tensor) -
 
 """
 def rope_apply(x, grid_sizes, freqs):
-    """
-    x:          [B, L, N, C].
-    grid_sizes: [B, 3].
-    freqs:      [M, C // 2].
-    """
     s, n, c = x.size(1), x.size(2), x.size(3) // 2
     # split freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
