@@ -24,12 +24,23 @@ def pad_freqs(original_tensor, target_len):
 
 @amp.autocast(enabled=False)
 def rope_apply(x: torch.Tensor, grid_sizes: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    """
+    x:          [B, L, N, C]
+    grid_sizes: [B, 3]
+    freqs:      [M, C//2]  # 关键点：C//2 是 freqs 的通道维度
+    """
     B, L, N, C = x.shape
-    output = torch.empty_like(x)
+    C_freq = freqs.size(1)  # 直接获取 freqs 的通道维度（= C//2）
     
-    # 修正后的通道拆分逻辑
-    split_sizes = [C - 2*(C//3), C//3, C//3]
-    assert sum(split_sizes) == C, f"Invalid split: {split_sizes} for C={C}"
+    # 计算正确的拆分尺寸
+    split_sizes = [
+        C_freq - 2 * (C_freq // 3),
+        C_freq // 3,
+        C_freq // 3
+    ]
+    assert sum(split_sizes) == C_freq, f"Split sizes {split_sizes} sum error"
+    
+    # 拆分频率张量
     freqs_parts = freqs.split(split_sizes, dim=1)
     
     # 分块处理（显存优化）
