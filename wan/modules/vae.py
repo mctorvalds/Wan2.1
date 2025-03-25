@@ -591,6 +591,7 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return mu
 """
+
     def decode(self, z, scale):
         self.clear_cache()
         # z: [b,c,t,h,w]
