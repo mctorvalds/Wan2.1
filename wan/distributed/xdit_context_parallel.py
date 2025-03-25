@@ -24,67 +24,47 @@ def pad_freqs(original_tensor, target_len):
 
 @amp.autocast(enabled=False)
 def rope_apply(x: torch.Tensor, grid_sizes: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    """
-    优化要点：
-    1. 预分配输出内存，避免`torch.stack`带来的显存峰值
-    2. 强制释放中间变量
-    3. 数据类型优化（FP64 -> FP32）
-    4. 分块频率计算
-    """
     B, L, N, C = x.shape
-    output = torch.empty_like(x)  # 预分配内存
+    output = torch.empty_like(x)
     
-    # 将频率张量提前转移到CPU（减少GPU显存压力）
-    freqs = freqs.cpu().split([(C//3)*2, C//3, C//3], dim=1)
-    grid_sizes = grid_sizes.cpu()
+    # 修正后的通道拆分逻辑
+    split_sizes = [C - 2*(C//3), C//3, C//3]
+    assert sum(split_sizes) == C, f"Invalid split: {split_sizes} for C={C}"
+    freqs_parts = freqs.split(split_sizes, dim=1)
     
-    # 分块参数（根据可用显存调整）
-    chunk_size = max(1, B // 4)  # 默认分4块
-    
+    # 分块处理（显存优化）
+    chunk_size = max(1, B // 4)
     for i in range(0, B, chunk_size):
         batch_chunk = x[i:i+chunk_size]
-        chunk_output = []
+        grid_chunk = grid_sizes[i:i+chunk_size].cpu()
         
         for j in range(batch_chunk.size(0)):
-            # ---- 频率计算优化 ----
-            idx = i + j
-            f, h, w = grid_sizes[idx].tolist()
+            # 获取当前样本参数
+            f, h, w = grid_chunk[j].tolist()
             seq_len = f * h * w
             
-            # 使用FP32替代FP64（精度验证通过）
-            x_ij = torch.view_as_complex(
-                batch_chunk[j, :L].float().reshape(L, N, -1, 2))
-            
-            # 分块生成频率张量
+            # 频率计算（显存优化版）
             freqs_chunk = [
-                freqs[0][:f].view(f,1,1,-1).expand(f,h,w,-1).to(x.device),
-                freqs[1][:h].view(1,h,1,-1).expand(f,h,w,-1).to(x.device),
-                freqs[2][:w].view(1,1,w,-1).expand(f,h,w,-1).to(x.device)
+                freqs_parts[0][:f].view(f,1,1,-1).expand(f,h,w,-1).to(x.device),
+                freqs_parts[1][:h].view(1,h,1,-1).expand(f,h,w,-1).to(x.device),
+                freqs_parts[2][:w].view(1,1,w,-1).expand(f,h,w,-1).to(x.device)
             ]
             freqs_ij = torch.cat(freqs_chunk, dim=-1).reshape(seq_len, 1, -1)
             
-            # ---- 序列并行优化 ----
+            # 序列并行处理
             sp_size = get_sequence_parallel_world_size()
             sp_rank = get_sequence_parallel_rank()
             freqs_ij = pad_freqs(freqs_ij, L * sp_size)
-            s_per_rank = L
-            freqs_ij = freqs_ij[(sp_rank*s_per_rank):(sp_rank+1)*s_per_rank]
+            freqs_ij = freqs_ij[(sp_rank*L):(sp_rank+1)*L]
             
-            # ---- 核心计算 ----
+            # 核心计算（混合精度优化）
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                x_rot = torch.view_as_real(x_ij * freqs_ij)
-            x_rot = x_rot.flatten(2)
+                x_ij = torch.view_as_complex(batch_chunk[j, :L].reshape(L, N, -1, 2))
+                x_rot = torch.view_as_real(x_ij * freqs_ij).flatten(2)
             
-            # 及时释放中间变量
+            # 填充结果并释放中间变量
+            output[i+j] = torch.cat([x_rot, batch_chunk[j, L:]]).to(x.dtype)
             del freqs_ij, x_ij
-            torch.cuda.empty_cache()
-            
-            # 拼接剩余部分
-            chunk_output.append(torch.cat([x_rot, batch_chunk[j, L:]]))
-        
-        # 填充预分配内存
-        output[i:i+chunk_size] = torch.stack(chunk_output).to(x.dtype)
-        
     return output
 
 """
