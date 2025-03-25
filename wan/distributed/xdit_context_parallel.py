@@ -53,7 +53,7 @@ def rope_apply(x: torch.Tensor, grid_sizes: torch.Tensor, freqs: torch.Tensor) -
             
             # 使用FP32替代FP64（精度验证通过）
             x_ij = torch.view_as_complex(
-                batch_chunk[j, :L].float().reshape(L, N, -1, 2)
+                batch_chunk[j, :L].float().reshape(L, N, -1, 2))
             
             # 分块生成频率张量
             freqs_chunk = [
